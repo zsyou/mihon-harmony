@@ -60,6 +60,7 @@ import tachiyomi.i18n.MR
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
@@ -407,14 +408,15 @@ class Downloader(
             )
 
             // Only rename the directory if it's downloaded
-            if (downloadPreferences.saveChaptersAsCBZ.get()) {
+            val completedDir = if (downloadPreferences.saveChaptersAsCBZ.get()) {
                 archiveChapter(mangaDir, chapterDirname, tmpDir)
+                tmpDir
             } else {
-                tmpDir.renameTo(chapterDirname)
+                renameOrCopy(tmpDir, mangaDir, chapterDirname)
             }
             cache.addChapter(chapterDirname, mangaDir, download.manga)
 
-            DiskUtil.createNoMediaFile(tmpDir, context)
+            DiskUtil.createNoMediaFile(completedDir, context)
 
             download.status = Download.State.DOWNLOADED
         } catch (error: Throwable) {
@@ -493,13 +495,13 @@ class Downloader(
             try {
                 response.body.source().saveTo(file.openOutputStream())
                 val extension = getImageExtension(response, file)
-                file.renameTo("$filename.$extension")
+                val completedFile = renameOrCopy(file, tmpDir, "$filename.$extension")
+                emit(completedFile)
             } catch (e: Exception) {
                 response.close()
                 file.delete()
                 throw e
             }
-            emit(file)
         }
             // Retry 3 times, waiting 2, 4 and 8 seconds between attempts.
             .retryWhen { _, attempt ->
@@ -528,9 +530,9 @@ class Downloader(
             }
         }
         val extension = ImageUtil.findImageType(cacheFile.inputStream()) ?: return tmpFile
-        tmpFile.renameTo("$filename.${extension.extension}")
+        val completedFile = renameOrCopy(tmpFile, tmpDir, "$filename.${extension.extension}")
         cacheFile.delete()
-        return tmpFile
+        return completedFile
     }
 
     /**
@@ -608,8 +610,72 @@ class Downloader(
                 writer.write(file)
             }
         }
-        zip.renameTo("$dirname.cbz")
+        renameOrCopy(zip, mangaDir, "$dirname.cbz")
         tmpDir.delete()
+    }
+
+    /**
+     * Renames a file or directory, falling back to copy-and-delete for SAF providers that do not
+     * support document renaming.
+     */
+    private fun renameOrCopy(source: UniFile, targetParent: UniFile, targetName: String): UniFile {
+        if (source.renameTo(targetName)) return source
+
+        if (targetParent.findFile(targetName) != null) {
+            throw IOException("Failed to rename ${source.uri}: target already exists: $targetName")
+        }
+
+        val target = if (source.isDirectory) {
+            targetParent.createDirectory(targetName)
+        } else {
+            targetParent.createFile(targetName)
+        } ?: throw IOException("Failed to create fallback target for ${source.uri}: $targetName")
+
+        try {
+            if (source.isDirectory) {
+                source.listFiles()?.forEach { child ->
+                    val childName = child.name
+                        ?: throw IOException("Failed to copy child with no name from ${source.uri}")
+                    renameFallbackCopy(child, target, childName)
+                } ?: throw IOException("Failed to list directory for fallback copy: ${source.uri}")
+            } else {
+                source.openInputStream().use { input ->
+                    target.openOutputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        } catch (error: Throwable) {
+            target.delete()
+            throw IOException("Failed to copy ${source.uri} to $targetName after rename failed", error)
+        }
+
+        if (!source.delete()) {
+            val cleanupFailed = !target.delete()
+            val cleanupMessage = if (cleanupFailed) "; also failed to delete the fallback target" else ""
+            throw IOException(
+                "Copied ${source.uri} to $targetName, but failed to delete the source$cleanupMessage",
+            )
+        }
+        return target
+    }
+
+    private fun renameFallbackCopy(source: UniFile, targetParent: UniFile, targetName: String) {
+        val target = if (source.isDirectory) {
+            targetParent.createDirectory(targetName)
+        } else {
+            targetParent.createFile(targetName)
+        } ?: throw IOException("Failed to create fallback target for ${source.uri}: $targetName")
+
+        if (source.isDirectory) {
+            source.listFiles()?.forEach { child ->
+                val childName = child.name
+                    ?: throw IOException("Failed to copy child with no name from ${source.uri}")
+                renameFallbackCopy(child, target, childName)
+            } ?: throw IOException("Failed to list directory for fallback copy: ${source.uri}")
+        } else {
+            source.openInputStream().use { input ->
+                target.openOutputStream().use { output -> input.copyTo(output) }
+            }
+        }
     }
 
     /**
