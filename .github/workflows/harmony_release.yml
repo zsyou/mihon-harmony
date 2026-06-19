@@ -91,6 +91,9 @@ jobs:
           git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
           git checkout --detach FETCH_HEAD
 
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
           while IFS= read -r commit; do
             [[ -z "$commit" || "$commit" == \#* ]] && continue
             git cherry-pick "$commit"
@@ -108,8 +111,6 @@ jobs:
           sed -i -E "0,/versionCode = [0-9]+/s//versionCode = $harmony_version_code/" app/build.gradle.kts
           sed -i -E "0,/versionName = \"[^\"]+\"/s//versionName = \"$harmony_version_name\"/" app/build.gradle.kts
 
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add app/build.gradle.kts
           git commit -m "build: set $harmony_version_name version"
 
