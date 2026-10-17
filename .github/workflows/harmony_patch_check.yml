@@ -33,6 +33,7 @@ jobs:
 
       - name: Apply patches onto the upstream tag
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         run: |
           set -euo pipefail
