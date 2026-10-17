@@ -197,11 +197,10 @@ new file mode 100644
 index 000000000..fd3f084a4
 --- /dev/null
 +++ b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,133 @@
 +package tachiyomi.core.common.storage
 +
 +import com.hippo.unifile.UniFile
-+import io.mockk.any
 +import io.mockk.every
 +import io.mockk.mockk
 +import io.mockk.verify

@@ -293,8 +293,15 @@ def assert_harmony_tree(repo: Path) -> None:
         raise PrepareError(
             "Downloader.kt is missing Harmony rename fallbacks: " + ", ".join(missing_calls),
         )
-    if "import io.mockk.any" not in test.read_text():
-        raise PrepareError("UniFileExtensionsTest.kt must import io.mockk.any.")
+    test_text = test.read_text()
+    # MockK 1.14 keeps any() on MockKMatcherScope. A package import does not resolve.
+    if "import io.mockk.any" in test_text:
+        raise PrepareError(
+            "UniFileExtensionsTest.kt imports io.mockk.any, which MockK 1.14 does not declare. "
+            "Call any() inside every/verify instead.",
+        )
+    if "createFile(any())" not in test_text:
+        raise PrepareError("UniFileExtensionsTest.kt must verify createFile with MockK any().")
 
     gradle_text = gradle.read_text()
     if UNSAFE_FILE_GETENV in gradle_text or UNSAFE_RELEASE_FLAG in gradle_text or UNSAFE_BASE64_LET in gradle_text:

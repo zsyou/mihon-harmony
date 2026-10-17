@@ -101,7 +101,9 @@ Refresh when `--check` reports that a patch does not apply, or when the patched 
      `core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt`.
      It must return the renamed file, or the copied file when rename is unsupported, and it must
      not overwrite an existing target.
-   - Keep the unit test next to it, including `import io.mockk.any`.
+   - Keep the unit test next to it. Call MockK `any()` inside `every` / `verify`.
+     Do not add `import io.mockk.any`: MockK 1.14 only declares `any` on `MockKMatcherScope`,
+     and that import fails `:core:common:compileDebugUnitTestKotlin`.
    - In `Downloader.kt`, final names for the chapter directory, page image, cached image, and CBZ
      archive must go through `renameToOrCopy`. Create `.nomedia` on the directory returned for a
      non-CBZ chapter, because a copy fallback returns a different file from the temporary directory.
