@@ -28,8 +28,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Dependency Review
+      - name: Check whether dependency review is available
+        id: dependency-review-support
         if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "Pull request SHAs are missing; cannot query dependency review." >&2
+            exit 1
+          fi
+          # dependency-review-action treats HTTP 403 from this endpoint as
+          # "Dependency review is not supported" (dependency graph disabled).
+          # Other responses still run the action, so a real review failure is not skipped.
+          set +e
+          response="$(gh api -i "repos/${GITHUB_REPOSITORY}/dependency-graph/compare/${BASE_SHA}...${HEAD_SHA}" 2>&1)"
+          status=$?
+          set -e
+          code="$(printf '%s\n' "$response" | awk '/^HTTP\// { code = $2 } END { print code }')"
+          if [[ "$code" == "403" ]]; then
+            echo "Dependency review is not supported on this repository because the dependency graph is disabled. Skipping."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$status" -ne 0 && -z "$code" ]]; then
+            echo "Could not query the dependency graph API:" >&2
+            printf '%s\n' "$response" >&2
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dependency Review
+        if: github.event_name == 'pull_request' && steps.dependency-review-support.outputs.available == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
 
       - name: Set up JDK
