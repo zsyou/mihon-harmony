@@ -43,18 +43,53 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    if (System.getenv("MIHON_GITHUB_RELEASE").toBoolean()) {
-        val tempStoreFile = file(System.getenv("RUNNER_TEMP")).resolve("antsy.keystore")
+    // Accept either storeFile (current Mihon) or storeFileBase64 (older tags) and
+    // never call a method on a null getenv() result.
+    val harmonyRelease = System.getenv("MIHON_GITHUB_RELEASE") == "true"
+    if (harmonyRelease) {
+        val runnerTemp = System.getenv("RUNNER_TEMP").orEmpty()
+        val encodedStore = System.getenv("storeFileBase64").orEmpty()
+        val directStore = System.getenv("storeFile").orEmpty()
+        val releaseStorePassword = System.getenv("storePassword").orEmpty()
+        val releaseKeyAlias = System.getenv("keyAlias").orEmpty()
+        val releaseKeyPassword = System.getenv("keyPassword").orEmpty()
+        val missingSigning = listOf(
+            "storePassword".takeIf { releaseStorePassword.isBlank() },
+            "keyAlias".takeIf { releaseKeyAlias.isBlank() },
+            "keyPassword".takeIf { releaseKeyPassword.isBlank() },
+            "storeFile or storeFileBase64".takeIf { encodedStore.isBlank() && directStore.isBlank() },
+            "RUNNER_TEMP".takeIf { encodedStore.isNotBlank() && directStore.isBlank() && runnerTemp.isBlank() },
+        ).filterNotNull()
+        if (missingSigning.isNotEmpty()) {
+            error(
+                "MIHON_GITHUB_RELEASE is set, but signing configuration is incomplete: " +
+                    missingSigning.joinToString(", ") +
+                    ". Set storeFile to a keystore path, or storeFileBase64 and RUNNER_TEMP.",
+            )
+        }
 
-        val storeFileBytes = System.getenv("storeFileBase64").let(Base64::decode)
-        tempStoreFile.outputStream().use { it.write(storeFileBytes) }
+        val releaseStoreFile = if (directStore.isNotBlank()) {
+            file(directStore)
+        } else {
+            val decodedBytes = try {
+                Base64.decode(encodedStore)
+            } catch (e: IllegalArgumentException) {
+                error("storeFileBase64 is not valid Base64: ${e.message}")
+            }
+            val decodedStore = file(runnerTemp).resolve("mihon-harmony.keystore")
+            decodedStore.outputStream().use { it.write(decodedBytes) }
+            decodedStore
+        }
+        if (!releaseStoreFile.isFile || releaseStoreFile.length() == 0L) {
+            error("Signing keystore is missing or empty: ${releaseStoreFile.absolutePath}")
+        }
 
         signingConfigs {
             named("debug") {
-                storeFile = tempStoreFile
-                storePassword = System.getenv("storePassword")
-                keyAlias = System.getenv("keyAlias")
-                keyPassword = System.getenv("keyPassword")
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     } else if (keystorePropertiesFile.exists()) {

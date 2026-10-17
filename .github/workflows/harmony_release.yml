@@ -14,6 +14,11 @@ on:
         required: true
         default: '1'
         type: string
+      dry_run:
+        description: 'Validate patches and the version bump, then stop before signing or publishing'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: harmony-release
@@ -31,6 +36,9 @@ jobs:
   release:
     name: Build and release
     runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
 
     steps:
       - name: Checkout fork history
@@ -38,6 +46,9 @@ jobs:
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 0
+
+      - name: Test Harmony prepare script
+        run: python3 .github/scripts/test_prepare_harmony_tree.py
 
       - name: Resolve release version
         id: version
@@ -56,14 +67,16 @@ jobs:
 
           if [[ ! "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Unsupported upstream tag: $upstream_tag" >&2
+            echo "Use a stable Mihon tag such as v0.21.2. See .github/HARMONY_RELEASE.md." >&2
             exit 1
           fi
           if [[ ! "$patch_number" =~ ^[1-9][0-9]?$ ]]; then
-            echo "Patch number must be between 1 and 99" >&2
+            echo "Patch number must be between 1 and 99, got: $patch_number" >&2
             exit 1
           fi
 
           release_tag="${upstream_tag}-harmony.${patch_number}"
+          echo "Resolved $release_tag from upstream $upstream_tag"
           echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
           echo "patch_number=$patch_number" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
@@ -73,11 +86,38 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run: existing releases are not skipped."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate signing secrets
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          ALIAS: ${{ secrets.ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$SIGNING_KEY" ]] || missing+=("SIGNING_KEY (Base64-encoded keystore file)")
+          [[ -n "$KEY_STORE_PASSWORD" ]] || missing+=("KEY_STORE_PASSWORD")
+          [[ -n "$ALIAS" ]] || missing+=("ALIAS")
+          [[ -n "$KEY_PASSWORD" ]] || missing+=("KEY_PASSWORD")
+          if ((${#missing[@]})); then
+            echo "Harmony Release cannot sign APKs. Add these Actions secrets:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            echo "Setup steps are in .github/HARMONY_RELEASE.md. No tag or release was created." >&2
+            exit 1
           fi
 
       - name: Prepare official source with Harmony patches
@@ -87,125 +127,75 @@ jobs:
           PATCH_NUMBER: ${{ steps.version.outputs.patch_number }}
         run: |
           set -euo pipefail
-
-          cp .github/patches/harmony.patch "$RUNNER_TEMP/harmony.patch"
-          git remote add upstream https://github.com/mihonapp/mihon.git
-          git fetch --no-tags upstream "refs/tags/$UPSTREAM_TAG"
-          git checkout --detach FETCH_HEAD
-
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-
-          git apply --3way "$RUNNER_TEMP/harmony.patch"
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path("app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt")
-          text = path.read_text()
-
-          def replace_once(old: str, new: str) -> None:
-              global text
-              if old not in text:
-                  raise SystemExit(f"Missing Downloader.kt patch pattern: {old!r}")
-              text = text.replace(old, new, 1)
-
-          import_anchor = "import tachiyomi.core.common.i18n.stringResource\n"
-          imports = [
-              "import tachiyomi.core.common.storage.extension\n",
-              "import tachiyomi.core.common.storage.renameToOrCopy\n",
-          ]
-          missing_imports = "".join(import_line for import_line in imports if import_line not in text)
-          if missing_imports:
-              replace_once(import_anchor, import_anchor + missing_imports)
-
-          replace_once(
-              "                tmpDir.renameTo(chapterDirname)\n",
-              "                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)\n"
-              "                DiskUtil.createNoMediaFile(chapterDir, context)\n",
-          )
-          replace_once("\n\n            DiskUtil.createNoMediaFile(tmpDir, context)\n\n", "\n")
-          replace_once(
-              "\n            try {\n                source.getImage",
-              "\n            val completedFile = try {\n                source.getImage",
-          )
-          replace_once(
-              '                    file.renameTo("$filename.$extension")\n',
-              '                    file.renameToOrCopy("$filename.$extension")\n',
-          )
-          replace_once("            emit(file)\n", "            emit(completedFile)\n")
-          replace_once(
-              '        tmpFile.renameTo("$filename.${extension.extension}")\n'
-              "        cacheFile.delete()\n"
-              "        return tmpFile\n",
-              '        val imageFile = tmpFile.renameToOrCopy("$filename.${extension.extension}")\n'
-              "        cacheFile.delete()\n"
-              "        return imageFile\n",
-          )
-          replace_once(
-              '        zip.renameTo("$dirname.cbz")\n',
-              '        zip.renameToOrCopy("$dirname.cbz")\n',
-          )
-
-          path.write_text(text)
-          PY
-          git add \
-            README.md \
-            app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt \
-            core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt \
-            core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
-          git commit -m "Apply Harmony compatibility patches"
-
-          upstream_version="${UPSTREAM_TAG#v}"
-          upstream_version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' app/build.gradle.kts | head -n 1)"
-          if [[ -z "$upstream_version_code" ]]; then
-            echo "Unable to read upstream versionCode" >&2
-            exit 1
+          args=(--upstream-tag "$UPSTREAM_TAG" --patch-number "$PATCH_NUMBER")
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--check)
+          else
+            args+=(--apply)
           fi
-
-          harmony_version_code=$((upstream_version_code * 100 + 10#$PATCH_NUMBER))
-          harmony_version_name="${upstream_version}-harmony.${PATCH_NUMBER}"
-          sed -i -E "0,/versionCode = [0-9]+/s//versionCode = $harmony_version_code/" app/build.gradle.kts
-          sed -i -E "0,/versionName = \"[^\"]+\"/s//versionName = \"$harmony_version_name\"/" app/build.gradle.kts
-
-          git add app/build.gradle.kts
-          git commit -m "build: set $harmony_version_name version"
-
-      - name: Validate signing secrets
-        if: steps.existing.outputs.skip != 'true'
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          [[ -n "$SIGNING_KEY" ]] || { echo "Missing SIGNING_KEY secret" >&2; exit 1; }
-          [[ -n "$KEY_STORE_PASSWORD" ]] || { echo "Missing KEY_STORE_PASSWORD secret" >&2; exit 1; }
-          [[ -n "$ALIAS" ]] || { echo "Missing ALIAS secret" >&2; exit 1; }
-          [[ -n "$KEY_PASSWORD" ]] || { echo "Missing KEY_PASSWORD secret" >&2; exit 1; }
+          python3 .github/scripts/prepare_harmony_tree.py "${args[@]}"
 
       - name: Set up JDK
-        if: steps.existing.outputs.skip != 'true'
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
         uses: actions/setup-java@ad2b38190b15e4d6bdf0c97fb4fca8412226d287 # v5.3.0
         with:
           java-version-file: .github/.java-version
           distribution: temurin
 
       - name: Set up Gradle
-        if: steps.existing.outputs.skip != 'true'
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
-      - name: Check, test, and build signed APKs
-        if: steps.existing.outputs.skip != 'true'
+      - name: Decode signing keystore
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        id: signing
         env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          ALIAS: ${{ secrets.ALIAS }}
+        run: |
+          set -euo pipefail
+          keystore="${RUNNER_TEMP}/antsy.keystore"
+          if ! printf '%s' "$SIGNING_KEY" | base64 -d > "$keystore"; then
+            echo "SIGNING_KEY is not valid Base64. Store the Base64 encoding of the keystore file, not the password." >&2
+            echo "See .github/HARMONY_RELEASE.md." >&2
+            exit 1
+          fi
+          if [[ ! -s "$keystore" ]]; then
+            echo "Decoded signing keystore is empty." >&2
+            exit 1
+          fi
+          if ! keytool -list -keystore "$keystore" -storepass "$KEY_STORE_PASSWORD" -alias "$ALIAS" </dev/null >/tmp/keytool.out 2>&1; then
+            echo "Could not open the signing keystore with KEY_STORE_PASSWORD and ALIAS." >&2
+            cat /tmp/keytool.out >&2
+            exit 1
+          fi
+          echo "keystore=$keystore" >> "$GITHUB_OUTPUT"
+
+      - name: Check, test, and build signed APKs
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          # Current Mihon reads storeFile. Older tags read storeFileBase64. Provide both.
+          storeFile: ${{ steps.signing.outputs.keystore }}
           storeFileBase64: ${{ secrets.SIGNING_KEY }}
           storePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyAlias: ${{ secrets.ALIAS }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew spotlessCheck testDebugUnitTest assembleRelease
+          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! -s "${storeFile}" ]]; then
+            echo "storeFile is missing: ${storeFile}" >&2
+            exit 1
+          fi
+          if ! ./gradlew spotlessCheck testDebugUnitTest assembleRelease; then
+            echo "Gradle failed on the Harmony-patched ${UPSTREAM_TAG} tree." >&2
+            echo "Patch conflicts are reported before this step. A compile or spotless failure in Downloader.kt or UniFileExtensions.kt means the Harmony patch needs a refresh. See .github/HARMONY_RELEASE.md." >&2
+            exit 1
+          fi
 
       - name: Sign APKs for legacy Mihon releases
-        if: steps.existing.outputs.skip != 'true' && hashFiles('app/build/outputs/apk/release/*-unsigned.apk') != ''
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true' && hashFiles('app/build/outputs/apk/release/*-unsigned.apk') != ''
         uses: r0adkll/sign-android-release@a391126403df92c6a0a3988a829dd47f79b89ed7
         with:
           releaseDirectory: app/build/outputs/apk/release
@@ -217,7 +207,7 @@ jobs:
           BUILD_TOOLS_VERSION: '35.0.1'
 
       - name: Prepare release files
-        if: steps.existing.outputs.skip != 'true'
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
         env:
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
         run: |
@@ -246,7 +236,7 @@ jobs:
           copy_release_apk arm64-v8a "release-files/mihon-${RELEASE_TAG}-arm64-v8a.apk"
 
       - name: Push tag and create GitHub release
-        if: steps.existing.outputs.skip != 'true'
+        if: steps.existing.outputs.skip != 'true' && env.DRY_RUN != 'true'
         env:
           UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
           RELEASE_TAG: ${{ steps.version.outputs.release_tag }}

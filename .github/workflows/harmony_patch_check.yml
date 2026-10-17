@@ -1,0 +1,47 @@
+name: Harmony patch check
+
+on:
+  pull_request:
+    paths:
+      - '.github/patches/**'
+      - '.github/scripts/**'
+      - '.github/workflows/harmony_release.yml'
+      - '.github/workflows/harmony_patch_check.yml'
+      - '.github/HARMONY_RELEASE.md'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Official Mihon tag; leave empty to use the latest stable release'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Apply Harmony patches
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Test Harmony prepare script
+        run: python3 .github/scripts/test_prepare_harmony_tree.py
+
+      - name: Apply patches onto the upstream tag
+        env:
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          upstream_tag="${INPUT_UPSTREAM_TAG:-}"
+          if [[ -z "$upstream_tag" ]]; then
+            upstream_tag="$(gh api repos/mihonapp/mihon/releases/latest --jq '.tag_name')"
+          fi
+          echo "Checking Harmony patches against $upstream_tag"
+          python3 .github/scripts/prepare_harmony_tree.py \
+            --check \
+            --upstream-tag "$upstream_tag" \
+            --patch-number 1
