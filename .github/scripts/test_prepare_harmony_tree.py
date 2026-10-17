@@ -88,7 +88,8 @@ class PatchContractTest(unittest.TestCase):
         self.assertIn("fun UniFile.renameToOrCopy", text)
         self.assertIn("tmpDir.renameToOrCopy(chapterDirname)", text)
         self.assertIn('file.renameToOrCopy("$filename.$extension")', text)
-        self.assertIn("import io.mockk.any", text)
+        self.assertIn("createFile(any())", text)
+        self.assertNotIn("import io.mockk.any", text)
 
 
 class ApplyFailureTest(unittest.TestCase):
