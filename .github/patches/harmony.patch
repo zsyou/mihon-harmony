@@ -30,6 +30,81 @@ index a41967b74..fb904d794 100644
  <div align="center">
  
  <a href="https://mihon.app">
+diff --git a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+index 105c153ef..d9055021f 100644
+--- a/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
++++ b/app/src/main/java/eu/kanade/tachiyomi/data/download/Downloader.kt
+@@ -53,6 +53,7 @@ import mihon.core.metro.AppCoroutineScope
+ import nl.adaptivity.xmlutil.serialization.XML
+ import okhttp3.Response
+ import tachiyomi.core.common.i18n.stringResource
++import tachiyomi.core.common.storage.renameToOrCopy
+ import tachiyomi.core.common.util.system.ImageUtil
+ import tachiyomi.core.common.util.system.logcat
+ import tachiyomi.core.metadata.comicinfo.COMIC_INFO_FILE
+@@ -503,12 +504,10 @@ class Downloader(
+             if (downloadPreferences.saveChaptersAsCBZ.get()) {
+                 archiveChapter(mangaDir, chapterDirname, tmpDir)
+             } else {
+-                tmpDir.renameTo(chapterDirname)
++                val chapterDir = tmpDir.renameToOrCopy(chapterDirname)
++                DiskUtil.createNoMediaFile(chapterDir, context)
+             }
+             cache.addChapter(chapterDirname, mangaDir, download.manga)
+-
+-            DiskUtil.createNoMediaFile(tmpDir, context)
+-
+             download.status = Download.State.DOWNLOADED
+         } catch (error: Throwable) {
+             if (error is CancellationException) throw error
+@@ -580,7 +579,7 @@ class Downloader(
+             val file = tmpDir.findFile("$filename.tmp")
+                 ?: tmpDir.createFile("$filename.tmp")!!
+ 
+-            try {
++            val completedFile = try {
+                 source.getImage(page, file.length()).use {
+                     it.body.source().saveTo(
+                         // If the server supports partial downloads (HTTP 206),
+@@ -589,7 +588,7 @@ class Downloader(
+                         stream = file.openOutputStream(it.code == 206),
+                     )
+                     val extension = getImageExtension(it, file)
+-                    file.renameTo("$filename.$extension")
++                    file.renameToOrCopy("$filename.$extension")
+                 }
+             } catch (e: HttpException) {
+                 if (e.code == 416) {
+@@ -597,7 +596,7 @@ class Downloader(
+                 }
+                 throw e
+             }
+-            emit(file)
++            emit(completedFile)
+         }
+             // Retry 3 times, waiting 2, 4 and 8 seconds between attempts.
+             .retryWhen { _, attempt ->
+@@ -628,9 +627,9 @@ class Downloader(
+             }
+         }
+         val extension = ImageUtil.findImageType(cacheFile.inputStream()) ?: return tmpFile
+-        tmpFile.renameTo("$filename.${extension.extension}")
++        val imageFile = tmpFile.renameToOrCopy("$filename.${extension.extension}")
+         cacheFile.delete()
+-        return tmpFile
++        return imageFile
+     }
+ 
+     /**
+@@ -720,7 +719,7 @@ class Downloader(
+                 writer.write(file)
+             }
+         }
+-        zip.renameTo("$dirname.cbz")
++        zip.renameToOrCopy("$dirname.cbz")
+         tmpDir.delete()
+     }
+ 
 diff --git a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt b/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
 index 8bbd9b3a7..80c9c93e0 100644
 --- a/core/common/src/main/kotlin/tachiyomi/core/common/storage/UniFileExtensions.kt
@@ -119,13 +194,14 @@ index 8bbd9b3a7..80c9c93e0 100644
 +}
 diff --git a/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
 new file mode 100644
-index 000000000..eaa9f82a3
+index 000000000..fd3f084a4
 --- /dev/null
 +++ b/core/common/src/test/java/tachiyomi/core/common/storage/UniFileExtensionsTest.kt
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,134 @@
 +package tachiyomi.core.common.storage
 +
 +import com.hippo.unifile.UniFile
++import io.mockk.any
 +import io.mockk.every
 +import io.mockk.mockk
 +import io.mockk.verify

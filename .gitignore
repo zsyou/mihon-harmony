@@ -15,3 +15,7 @@ local.properties
 
 # macOS specific files
 .DS_Store
+
+# Local Python checks for the Harmony prepare script
+__pycache__/
+*.pyc
